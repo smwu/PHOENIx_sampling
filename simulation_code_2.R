@@ -77,40 +77,6 @@ simulate_binary_data <- function(K, nk, p_baseline, OR, p_exposed, gamma) {
 }
 
 
-gen_sub_des0 <- function(data, ratio) {
-  # Function to generate subcohort for design 0: case-control with clustering
-  # Returns subsetted data with weights as a new column
-  # data: full dataset to sample from
-  # ratio: control-to-case ratio
-  cases <- filter(data, y==1)
-  srs <- sample(x=unique(data$cluster), size=ratio*nrow(cases))  # SRS of cluster indices
-  sub_controls <- filter(data, cluster %in% srs) %>%   # get selected clusters
-    filter(y==0) %>%
-    group_by(cluster) %>%
-    group_modify(~ sample_n(.x, size=1))  # for each selected cluster, choose 1 control
-  sub_cohort <- bind_rows(cases, sub_controls) %>% group_by(cluster)
-  
-  w1 <- 1  # N1/n1
-  w10 <- 2*length(unique(data$cluster)) / length(srs)  # 2C/c
-  w0 <- w10/2  # C/c
-  
-  type <- tapply(sub_cohort$y, sub_cohort$cluster, function(y) {ifelse(length(y)>1, 2, ifelse(y==1, 1, 0))})
-  unique_clusters <- unique(sub_cohort$cluster)
-  temp <- data.frame(cbind(unique_clusters, type))
-  colnames(temp) <- c("cluster", "type")
-  sub_cohort <- merge(sub_cohort, temp, by="cluster") %>%
-    mutate(weights = ifelse(type==2, w10, ifelse(type==1, w1, w0)))
-  
-  output <- sub_cohort %>% group_by(cluster)
-  
-  # fit IPWGEE and get robust variance for beta1
-  fit <- geeglm(y ~ x, id=cluster, data=output, weights = weights, 
-                family=binomial, scale.fix=TRUE, corstr="independence")
-  var_slope <- summary(fit)$coefficients[2,2]
-  
-  return(list("var_slope" = var_slope, "estimate" = summary(fit)$coefficients[2,1], "output" = as.data.frame(output)))
-}
-
 gen_sub_des1 <- function(data, ratio) {
   # Function to generate subcohort for design 1: stratified one-stage cluster sampling
   # Returns subsetted data with weights as a new column
@@ -242,6 +208,40 @@ gen_sub_des4 <- function(data, ratio) {
   return(list("var_slope" = var_slope, "estimate" = summary(fit)$coefficients[2,1], "output" = as.data.frame(output)))
 }
 
+gen_sub_des5 <- function(data, ratio) {
+  # Function to generate subcohort for Design 5: case-control with clustering
+  # Returns subsetted data with weights as a new column
+  # data: full dataset to sample from
+  # ratio: control-to-case ratio
+  cases <- filter(data, y==1)
+  srs <- sample(x=unique(data$cluster), size=ratio*nrow(cases))  # SRS of cluster indices
+  sub_controls <- filter(data, cluster %in% srs) %>%   # get selected clusters
+    filter(y==0) %>%
+    group_by(cluster) %>%
+    group_modify(~ sample_n(.x, size=1))  # for each selected cluster, choose 1 control
+  sub_cohort <- bind_rows(cases, sub_controls) %>% group_by(cluster)
+  
+  w1 <- 1  # N1/n1
+  w10 <- 2*length(unique(data$cluster)) / length(srs)  # 2C/c
+  w0 <- w10/2  # C/c
+  
+  type <- tapply(sub_cohort$y, sub_cohort$cluster, function(y) {ifelse(length(y)>1, 2, ifelse(y==1, 1, 0))})
+  unique_clusters <- unique(sub_cohort$cluster)
+  temp <- data.frame(cbind(unique_clusters, type))
+  colnames(temp) <- c("cluster", "type")
+  sub_cohort <- merge(sub_cohort, temp, by="cluster") %>%
+    mutate(weights = ifelse(type==2, w10, ifelse(type==1, w1, w0)))
+  
+  output <- sub_cohort %>% group_by(cluster)
+  
+  # fit IPWGEE and get robust variance for beta1
+  fit <- geeglm(y ~ x, id=cluster, data=output, weights = weights, 
+                family=binomial, scale.fix=TRUE, corstr="independence")
+  var_slope <- summary(fit)$coefficients[2,2]
+  
+  return(list("var_slope" = var_slope, "estimate" = summary(fit)$coefficients[2,1], "output" = as.data.frame(output)))
+}
+
 
 
 temp_trials <- function(gamma, MC_sims) {
@@ -280,7 +280,6 @@ library(dplyr)
 library(ICCbin)
 data <- simulate_binary_data(K=734, nk=2, p_baseline=0.025, OR=2.05, p_exposed=0.2, gamma=0.3)
 
-
 get_data_chars <- function(data) {
   num_per_cluster <- data %>% count(cluster)
   nk_table <- table(num_per_cluster$n)
@@ -318,27 +317,33 @@ fit_full <- geeglm(y ~ x, id=cluster, data=data, family=binomial, scale.fix=TRUE
 summary(fit_full)$corr
 
 # chars_df <- as.data.frame(matrix(NA, nrow=13, ncol=5))
+
+# Sanity check design characteristics after M simulations 
 MC <- 100
 
+# Initialize dataframes for the various designs
 df_full <- as.data.frame(matrix(NA, nrow=13, ncol=MC))
 df_Des1 <- as.data.frame(matrix(NA, nrow=13, ncol=MC))
 df_Des2 <- as.data.frame(matrix(NA, nrow=13, ncol=MC))
 df_Des3 <- as.data.frame(matrix(NA, nrow=13, ncol=MC))
 df_Des4 <- as.data.frame(matrix(NA, nrow=13, ncol=MC))
+df_Des5 <- as.data.frame(matrix(NA, nrow=13, ncol=MC))
 
+# Set simulation parameters based on PHOENIx trial
+K <- 734; nk <- 2; p_baseline <- 0.025; OR <- 2.05; p_exposed <- 0.2; gamma <- 0.3
+
+# Run simulations
 for (i in 1:MC) {
-  data <- simulate_binary_data(K=734, nk=2, p_baseline=0.025, OR=2.05, p_exposed=0.2, gamma=0.3)
+  data <- simulate_binary_data(K=K, nk=nk, p_baseline=p_baseline, OR=OR, p_exposed=p_exposed, gamma=gamma)
   df_full[,i] <- get_data_chars(data)
 }
 
 chars_df <- as.data.frame(cbind(apply(df_full, 1, mean))) 
-                                rowSums(df_Des1)/MC, rowSums(df_Des2)/MC, 
-                  rowSums(df_Des3)/MC, rowSums(df_Des3)/MC))
-colnames(chars_df) <- c("Full", "Des 1", "Des 2", "Des 3", "Des 4")
+colnames(chars_df) <- c("Full", "Des 1", "Des 2", "Des 3", "Des 4", "Des 5")
 rownames(chars_df) <- c("P(X=1)", "P(Y=1)", "P(Y=1|X=1)", "P(Y=1|X=0)", "OR", "ICC", 
                         "K_case_0", "K_case_1", "K_case>2", "nk=1", "nk=2", "mean nk", "median nk")
 
-K <- 734; nk <- 2; p_baseline <- 0.025; OR <- 2.05; p_exposed <- 0.2; gamma <- 0.3
+
 
 library(mvtnorm)
 x_it <- -3
@@ -366,21 +371,21 @@ oper <- foreach (icount(MC_sims), .combine=rbind, .packages=c("SimCorMultRes", "
   data <- simulate_binary_data(K=734, nk=2, p_baseline=0.025, OR=2.05, p_exposed=0.2, gamma=0.3)
   
   # Get variance estimates
-  des0 <- gen_sub_des0(data, ratio=2)  # 80 clusters, 22 exposed, weights 17.1, 34.1
+  des5 <- gen_sub_des5(data, ratio=2)  # 80 clusters, 22 exposed, weights 17.1, 34.1
   des1 <- gen_sub_des1(data, ratio=2)  # 64 clusters, 35 exposed, weights 30.1
   des2 <- gen_sub_des2(data, ratio=2)  # 88 clusters, 44 exposed, weights 29.5
   des3 <- gen_sub_des3(data, ratio=2)  # 127 clusters, 42 exposed, weights 16.1
   des4 <- gen_sub_des4(data, ratio=2)  # 123 clusters, 37 exposed, weights 16.6
   
   # Get sampling design characteristics
-  sampling_chars <- list(des0$output, des1$output, des2$output, des3$output, des4$output)
+  sampling_chars <- list(des5$output, des1$output, des2$output, des3$output, des4$output)
   n_clus <- sapply(sampling_chars, function(x) length(unique(x$cluster)))
   max_wt <- sapply(sampling_chars, function(x) max(x$weights))
   n_cases <- sapply(sampling_chars, function(x) sum(x$y))
   n_exp <- sapply(sampling_chars, function(x) sum(x$x))
   
-  result <- c(des0[[1]], des1[[1]], des2[[1]], des3[[1]], des4[[1]], 
-              des0[[2]], des1[[2]], des2[[2]], des3[[2]], des4[[2]], n_clus, max_wt, n_cases, n_exp)
+  result <- c(des5[[1]], des1[[1]], des2[[1]], des3[[1]], des4[[1]], 
+              des5[[2]], des1[[2]], des2[[2]], des3[[2]], des4[[2]], n_clus, max_wt, n_cases, n_exp)
   return(result)
 }
 colnames(oper) <- rep(paste0("Design ", 0:4), 6)
@@ -397,13 +402,13 @@ oper <- foreach (icount(MC_sims), .combine=rbind, .packages=c("SimCorMultRes", "
   data <- simulate_binary_data(K=734, nk=2, p_baseline=0.025, OR=2.05, p_exposed=0.2, gamma=0)
   
   # Get variance estimates
-  des0 <- gen_sub_des0(data, ratio=2)  # 80 clusters, 22 exposed, weights 17.1, 34.1
+  des5 <- gen_sub_des5(data, ratio=2)  # 80 clusters, 22 exposed, weights 17.1, 34.1
   des1 <- gen_sub_des1(data, ratio=2)  # 64 clusters, 35 exposed, weights 30.1
   des2 <- gen_sub_des2(data, ratio=2)  # 88 clusters, 44 exposed, weights 29.5
   des3 <- gen_sub_des3(data, ratio=2)  # 127 clusters, 42 exposed, weights 16.1
   des4 <- gen_sub_des4(data, ratio=2)  # 123 clusters, 37 exposed, weights 16.6
-  result <- c(des0[[1]], des1[[1]], des2[[1]], des3[[1]], des4[[1]],
-              des0[[2]], des1[[2]], des2[[2]], des3[[2]], des4[[2]])
+  result <- c(des5[[1]], des1[[1]], des2[[1]], des3[[1]], des4[[1]],
+              des5[[2]], des1[[2]], des2[[2]], des3[[2]], des4[[2]])
   return(result)
 }
 results_alpha0 <- apply(oper, 2, mean)
@@ -418,13 +423,13 @@ oper <- foreach (icount(MC_sims), .combine=rbind, .packages=c("SimCorMultRes", "
   data <- simulate_binary_data(K=734, nk=2, p_baseline=0.025, OR=2.05, p_exposed=0.2, gamma=0.5)
   
   # get variance estimates
-  des0 <- gen_sub_des0(data, ratio=2)  # 80 clusters, 22 exposed, weights 17.1, 34.1
+  des5 <- gen_sub_des5(data, ratio=2)  # 80 clusters, 22 exposed, weights 17.1, 34.1
   des1 <- gen_sub_des1(data, ratio=2)  # 64 clusters, 35 exposed, weights 30.1
   des2 <- gen_sub_des2(data, ratio=2)  # 88 clusters, 44 exposed, weights 29.5
   des3 <- gen_sub_des3(data, ratio=2)  # 127 clusters, 42 exposed, weights 16.1
   des4 <- gen_sub_des4(data, ratio=2)  # 123 clusters, 37 exposed, weights 16.6
-  result <- c(des0[[1]], des1[[1]], des2[[1]], des3[[1]], des4[[1]],
-              des0[[2]], des1[[2]], des2[[2]], des3[[2]], des4[[2]])
+  result <- c(des5[[1]], des1[[1]], des2[[1]], des3[[1]], des4[[1]],
+              des5[[2]], des1[[2]], des2[[2]], des3[[2]], des4[[2]])
   return(result)
 }
 results_alpha3 <- apply(oper, 2, mean)
@@ -742,15 +747,15 @@ calcVarianceJoint <- function(w0, w1=1, weights, cluster, u0, u1, alpha, K, n, p
 
 alphas <- c(0, 0.15, 0.3)
 variances <- as.data.frame(matrix(0, nrow = length(alphas), ncol = 5))
-colnames(variances) <- c("Design 0", "Design 1", "Design 2", "Design 3", "Design 4")
+colnames(variances) <- c("Design 5", "Design 1", "Design 2", "Design 3", "Design 4")
 rownames(variances) <- paste0("$\\alpha$ = ", alphas)
 n1 <- 44
 
 for (i in 1:length(alphas)) {
   alpha <- alphas[i]
-  # Design 0 Scenario 1
+  # Design 5 Scenario 1
   # Order: double case, single case, single control
-  d0_s1 <- calcVarianceJoint(w0=734/88, w1=1, weights=c(rep(0, 5), rep(1, 39), rep(734/88*2, 83)), 
+  d5_s1 <- calcVarianceJoint(w0=734/88, w1=1, weights=c(rep(0, 5), rep(1, 39), rep(734/88*2, 83)), 
                              cluster=c(rep(FALSE, 5), rep(TRUE, 122)), u0=0.025, u1=0.05, alpha=alpha,
                              K=127, n=c(rep(2, 5), rep(1, 122)),
                              p00=c(rep(0.42, 5), rep(0, 39), rep(0.84, 83)), p01=c(rep(0.36, 5), rep(0.72, 39), rep(0, 83)),
@@ -784,7 +789,7 @@ for (i in 1:length(alphas)) {
                         p00=c(rep(0.42, 3), rep(0, 41), rep(0.84, 6+73)), p01=c(rep(0.36, 3), rep(0.72, 41), rep(0, 6+73)),
                         p10=c(rep(0.08, 3), rep(0, 41), rep(0.16, 6+73)), p11=c(rep(0.14, 3), rep(0.28, 41), rep(0, 6+73)))
   
-  variances[i, 1] <- d0_s1[[1]][2,1]  # Design 0
+  variances[i, 1] <- d5_s1[[1]][2,1]  # Design 5
   variances[i, 2] <- d1_s1[[1]][2,1]  # Design 1
   variances[i, 3] <- d2_s1[[1]][2,1]  # Design 2
   variances[i, 4] <- d3_s1[[1]][2,1]  # Design 3
