@@ -21,16 +21,24 @@ library(gridExtra)
 # https://cran.r-project.org/web/packages/SimCorMultRes/vignettes/SimCorMultRes.html
 # https://journal.r-project.org/archive/2016/RJ-2016-034/index.html
 
-#============================= Simulations ====================================
+
+
+#============================= Simulation Functions ====================================
 
 simulate_binary_data <- function(K, nk, p_baseline, OR, p_exposed, gamma) {
-  # Function to simulate data with binary outcome and binary covariate
-  # K: number of clusters
-  # nk: size per cluster
-  # p_baseline: P(Y=1|X=0)
-  # OR: odds ratio
-  # p_exposed: P(X=1)
-  # gamma: correlation between the latent variables
+  # Simulate data with binary outcome and binary covariate
+  # Inputs:
+    # K: number of clusters
+    # nk: size per cluster
+    # p_baseline: P(Y=1|X=0)
+    # OR: odds ratio
+    # p_exposed: P(X=1)
+    # gamma: correlation between the latent variables
+  # Returns dataframe with the following columns:
+    # y: binary outcome (correlated)
+    # x: binary covariate (independent)
+    # cluster: cluster label
+    # id: individual label within each cluster
   
   # sample size
   sample_size <- K
@@ -43,11 +51,11 @@ simulate_binary_data <- function(K, nk, p_baseline, OR, p_exposed, gamma) {
   # individual-level covariate with proportions that may differ acros clusters
   x <- rbinom(cluster_size*sample_size, 1, prob=p_exposed)
   
-  library(bindata)
-  for (i in 1:sample_size) {
-    rmvbin(cluster_size[i], margprob=p_exposed, bincorr)
-  }
-  x <- rmvbin()
+  # library(bindata)
+  # for (i in 1:sample_size) {
+  #   rmvbin(cluster_size[i], margprob=p_exposed, bincorr)
+  # }
+  # x <- rmvbin()
   
   # # correlation matrix for the NORTA method
   # latent_correlation_matrix <- toeplitz(c(1, gamma, gamma, gamma))
@@ -78,20 +86,26 @@ simulate_binary_data <- function(K, nk, p_baseline, OR, p_exposed, gamma) {
 
 
 gen_sub_des1 <- function(data, ratio) {
-  # Function to generate subcohort for design 1: stratified one-stage cluster sampling
-  # Returns subsetted data with weights as a new column
-  # data: full dataset to sample from
-  # ratio: control-to-case ratio
+  # Generate subcohort for design 1: stratified one-stage cluster sampling
+  # Inputs:
+    # data: full dataset to sample from
+    # ratio: control-to-case ratio
+  # Returns dataframe of subsetted data with the following additional columns:
+    # max: maximum number of cases per cluster
+    # type: cluster status (1 for case cluster, 0 for control cluster)
+    # weights: weights for each individual
   
   # cluster status = 1 if cluster contains at least one case; 0 otherwise
   cluster_status <- data %>% group_by(cluster) %>% summarise(max = max(y), .groups = "keep")
-  data <- merge(data, cluster_status, by="cluster")
+  data <- merge(data, cluster_status, by="cluster")  # merge cluster status into dataset
   
+  # Sampling cases
   # get case clusters and label with type = 1
-  case_clusters <- filter(data, max==1) %>% mutate(type = 1)
+  case_clusters <- filter(data, max>0) %>% mutate(type = 1)
   n_cases <- sum(case_clusters$y==1)  # number of cases
   controls_in_case <- sum(case_clusters$y==0)  # number of controls in case clusters
   
+  # Sampling controls
   # get control clusters and label with type = 0
   control_clusters <- filter(data, max==0) %>% mutate(type = 0)
   # SRS of control cluster indices
@@ -100,152 +114,216 @@ gen_sub_des1 <- function(data, ratio) {
   # combine data from case clusters and selected control clusters
   sub_cohort <- bind_rows(case_clusters, sub_controls) %>% group_by(cluster)
   
+  # Weights
   w1 <- 1 
   w0 <- length(unique(control_clusters$cluster)) / length(srs)  # C0/c0
   
+  # assign weights
   sub_cohort <- mutate(sub_cohort, weights = ifelse(type==1, w1, w0))
-  output <- sub_cohort %>% group_by(cluster)
+  output <- sub_cohort %>% group_by(cluster)  # sampled data, grouped by cluster
   
-  # fit IPWGEE and get robust variance for beta1
-  fit <- geeglm(y ~ x, id=cluster, data=output, weights = weights, 
-                family=binomial, scale.fix=TRUE, corstr="independence")
-  var_slope <- summary(fit)$coefficients[2,2]
-  
-  return(list("var_slope" = var_slope, "estimate" = summary(fit)$coefficients[2,1], "output" = as.data.frame(output)))
+  # Return sampled data as a dataframe
+  return(as.data.frame(output))
 }
 
 gen_sub_des2 <- function(data, ratio) {
-  # Function to generate subcohort for design 2: stratified two-stage cluster sampling
-  # Returns subsetted data with weights as a new column
-  # data: full dataset to sample from
-  # ratio: control-to-case ratio
+  # Generate subcohort for design 2: stratified two-stage cluster sampling
+  # Inputs:
+    # data: full dataset to sample from
+    # ratio: control-to-case ratio
+  # Returns subsetted data with the following additional columns:
+    # max: maximum number of cases per cluster
+    # type: cluster status (1 for case cluster, 0 for control cluster)
+    # weights: weights for each individual
   
   # cluster status = 1 if cluster contains at least one case; 0 otherwise
   cluster_status <- data %>% group_by(cluster) %>% summarise(max = max(y), .groups = "keep")
   data <- merge(data, cluster_status, by="cluster")
   
+  # Get number of controls in each cluster, and add to dataset (NA if no controls in a cluster)
+  N_k0 <- data %>% filter(y==0) %>% group_by(cluster) %>% summarise(N_k0 = n(), .groups = "keep")
+  data <- merge(data, N_k0, by="cluster", all.x=TRUE)
+  
+  # Sampling cases
   # get case clusters and label with type = 1
-  case_clusters <- filter(data, max==1) %>% mutate(type = 1)
+  case_clusters <- filter(data, max>0) %>% mutate(type = 1)
   n_cases <- sum(case_clusters$y==1)  # number of cases
   controls_in_case <- sum(case_clusters$y==0)  # number of controls in case clusters
   
+  # Sampling controls
   # get control clusters and label with type = 0
   control_clusters <- filter(data, max==0) %>% mutate(type = 0)
   # SRS of control cluster indices
   srs <- sample(x=unique(control_clusters$cluster), size=max(0, ratio*n_cases-controls_in_case))
   sub_controls <- filter(control_clusters, cluster %in% srs)  # get selected control clusters
+  # select only one individual from each control cluster (first row of each cluster)
+  sub_controls <- sub_controls[!duplicated(sub_controls$cluster),]
   # combine data from case clusters and selected control clusters
   sub_cohort <- bind_rows(case_clusters, sub_controls) %>% group_by(cluster)
   
+  # Weights
   w1 <- 1 
-  w0 <- 2*length(unique(control_clusters$cluster)) / length(srs)  # 2C0/c0
+  w0 <- length(unique(control_clusters$cluster)) / length(srs)  # C0/c0(*N_k0 in next line)
   
-  sub_cohort <- mutate(sub_cohort, weights = ifelse(type==1, w1, w0))
+  # assign weights
+  sub_cohort <- sub_cohort %>% mutate(weights = ifelse(y==1, w1, w0*N_k0)) %>% group_by(cluster)
   output <- sub_cohort %>% group_by(cluster)
   
-  # fit IPWGEE and get robust variance for beta1
-  fit <- geeglm(y ~ x, id=cluster, data=output, weights = weights, 
-                family=binomial, scale.fix=TRUE, corstr="independence")
-  var_slope <- summary(fit)$coefficients[2,2]
-  
-  return(list("var_slope" = var_slope, "estimate" = summary(fit)$coefficients[2,1], "output" = as.data.frame(output)))
+  # Return sampled data as a dataframe
+  return(as.data.frame(output))
 }
 
 
 gen_sub_des3 <- function(data, ratio) {
-  # Function to generate subcohort for design 3: dispersed stratified two-stage cluster sampling
-  # Returns subsetted data with weights as a new column
-  # data: full dataset to sample from
-  # ratio: control-to-case ratio
+  # Generate subcohort for design 3: dispersed stratified two-stage cluster sampling
+  # Inputs:
+    # data: full dataset to sample from
+    # ratio: control-to-case ratio
+  # Returns subsetted data with the following additional columns:
+    # max: maximum number of cases per cluster
+    # type: cluster status (1 for case cluster, 0 for control cluster)
+    # weights: weights for each individual
   
   # cluster status = 1 if cluster contains at least one case; 0 otherwise
   cluster_status <- data %>% group_by(cluster) %>% summarise(max = max(y), .groups = "keep")
   data <- merge(data, cluster_status, by="cluster")
   
-  # get cases
+  # Get number of controls in each cluster, and add to dataset (NA if no controls in a cluster)
+  N_k0 <- data %>% filter(y==0) %>% group_by(cluster) %>% summarise(N_k0 = n(), .groups = "keep")
+  data <- merge(data, N_k0, by="cluster", all.x=TRUE)
+  
+  # Sampling cases
+  # get data for cases and label with type = 1
   cases <- filter(data, y==1) %>% mutate(type = 1)
   
+  # Sampling controls
   # get control clusters and label with type = 0
   control_clusters <- filter(data, max==0) %>% mutate(type = 0)
   # SRS of control cluster indices
   srs <- sample(x=unique(control_clusters$cluster), size=max(0, ratio*nrow(cases)))
   sub_controls <- filter(control_clusters, cluster %in% srs)  # get selected control clusters
+  # select only one individual from each control cluster (first row of each cluster)
+  sub_controls <- sub_controls[!duplicated(sub_controls$cluster),]
   # combine data from cases and selected control clusters
+  sub_controls <- filter(control_clusters, cluster %in% srs) %>%  # get selected control clusters
+    group_by(cluster) %>% group_modify(~ sample_n(.x, size=1))  # choose 1 control per cluster
   sub_cohort <- bind_rows(cases, sub_controls) %>% group_by(cluster)
   
+  # Weights
   w1 <- 1 
-  w0 <- 2*length(unique(control_clusters$cluster)) / length(srs)  # 2C0/c0
+  w0 <- length(unique(control_clusters$cluster)) / length(srs)  # C0/c0(*N_k0 in next line)
   
-  sub_cohort <- mutate(sub_cohort, weights = ifelse(type==1, w1, w0))
+  # assign weights
+  sub_cohort <- sub_cohort %>% mutate(weights = ifelse(y==1, w1, w0*N_k0)) %>% group_by(cluster)
   output <- sub_cohort %>% group_by(cluster)
   
-  # fit IPWGEE and get robust variance for beta1
-  fit <- geeglm(y ~ x, id=cluster, data=output, weights = weights, 
-                family=binomial, scale.fix=TRUE, corstr="independence")
-  var_slope <- summary(fit)$coefficients[2,2]
-  
-  return(list("var_slope" = var_slope, "estimate" = summary(fit)$coefficients[2,1], "output" = as.data.frame(output)))
+  # Return sampled data as a dataframe
+  return(as.data.frame(output))
 }
 
 gen_sub_des4 <- function(data, ratio) {
-  # Function to generate subcohort for design 4: standard case-control
-  # Returns subsetted data with weights as a new column
-  # data: full dataset to sample from
-  # ratio: control-to-case ratio
+  # Generate subcohort for design 4: standard case-control
+  # Inputs:
+    # data: full dataset to sample from
+    # ratio: control-to-case ratio
+  # Returns subsetted data with the additional column:
+    # weights: weights for each individual
+  
+  # Sampling cases
   cases <- filter(data, y==1)
-  controls <- filter(data, y==0)
+  
+  # Sampling controls
+  controls <- filter(data, y==0)  # select controls
+  # SRS of controls
   srs <- sample(x=1:nrow(controls), size=min(nrow(controls), ratio*nrow(cases)))
   sub_controls <- controls[srs,]  # select sub-cohort of controls
+  
+  # Weights
   w1 <- 1  #N1/n1
   w0 <- nrow(controls)/nrow(sub_controls)  # N0/n0
-  output <- rbind(cases, sub_controls) %>% mutate(weights = ifelse(y==1, 1, w0)) %>% group_by(cluster)
+  # assign weights
+  output <- rbind(cases, sub_controls) %>% mutate(weights = ifelse(y==1, w1, w0)) %>% group_by(cluster)
   
-  # fit IPWGEE and get robust variance for beta1
-  fit <- geeglm(y ~ x, id=cluster, data=output, weights = weights, 
-                family=binomial, scale.fix=TRUE, corstr="independence")
-  var_slope <- summary(fit)$coefficients[2,2]
-  
-  return(list("var_slope" = var_slope, "estimate" = summary(fit)$coefficients[2,1], "output" = as.data.frame(output)))
+  # Return sampled data as a dataframe
+  return(as.data.frame(output))
 }
 
 gen_sub_des5 <- function(data, ratio) {
-  # Function to generate subcohort for Design 5: case-control with clustering
-  # Returns subsetted data with weights as a new column
-  # data: full dataset to sample from
-  # ratio: control-to-case ratio
+  # Generate subcohort for Design 5: case-control with clustering
+  # Inputs:
+    # data: full dataset to sample from
+    # ratio: control-to-case ratio
+  # Returns subsetted data with the following additional columns:
+    # N_k0: number of controls in each cluster
+    # weights: weights for each individual
+  
+  # Get number of controls in each cluster, and add to dataset (NA if no controls in a cluster)
+  N_k0 <- data %>% filter(y==0) %>% group_by(cluster) %>% summarise(N_k0 = n(), .groups = "keep")
+  data <- merge(data, N_k0, by="cluster", all.x=TRUE)
+  
+  # Sampling cases
   cases <- filter(data, y==1)
-  srs <- sample(x=unique(data$cluster), size=ratio*nrow(cases))  # SRS of cluster indices
-  sub_controls <- filter(data, cluster %in% srs) %>%   # get selected clusters
-    filter(y==0) %>%
-    group_by(cluster) %>%
-    group_modify(~ sample_n(.x, size=1))  # for each selected cluster, choose 1 control
+  
+  # Sampling controls
+  # restrict to clusters with at least one control
+  clusters_with_control <- data %>% group_by(cluster) %>% filter(any(y==0))
+  # SRS of cluster indices from among those with at least one control
+  srs <- sample(x=unique(clusters_with_control$cluster), size=ratio*nrow(cases)) 
+  # Restrict to controls within the selected clusters
+  sub_controls <- filter(clusters_with_control, cluster %in% srs) %>% filter(y==0)
+  # select only one individual from each control cluster (first row of each cluster)
+  sub_controls <- sub_controls[!duplicated(sub_controls$cluster),]
+          # # Select one control per selected cluster to include in the sample
+          # sub_controls %>% filter(y==0) %>% group_by(cluster) %>% group_modify(~ sample_n(.x, size=1)) 
+          # # get controls in the selected clusters
+          # sub_controls <- filter(data, cluster %in% srs) %>% filter(y==0) 
+  
+  # Sample data
   sub_cohort <- bind_rows(cases, sub_controls) %>% group_by(cluster)
+  # # Add in original cluster sizes
+  # sub_cohort <- merge(sub_cohort, cluster_sizes, by="cluster")
   
+  # Weights
   w1 <- 1  # N1/n1
-  w10 <- 2*length(unique(data$cluster)) / length(srs)  # 2C/c
-  w0 <- w10/2  # C/c
+  # w10 <- 2*length(unique(data$cluster)) / length(srs)  # 2C/c
+  w0 <- length(unique(clusters_with_control$cluster)) / length(srs)  # K_0/n_0 (*N_k0 in following line)
   
-  type <- tapply(sub_cohort$y, sub_cohort$cluster, function(y) {ifelse(length(y)>1, 2, ifelse(y==1, 1, 0))})
-  unique_clusters <- unique(sub_cohort$cluster)
-  temp <- data.frame(cbind(unique_clusters, type))
-  colnames(temp) <- c("cluster", "type")
-  sub_cohort <- merge(sub_cohort, temp, by="cluster") %>%
-    mutate(weights = ifelse(type==2, w10, ifelse(type==1, w1, w0)))
+  # Assign weights
+  sub_cohort <- sub_cohort %>% mutate(weights = ifelse(y==1, w1, w0*N_k0)) %>% group_by(cluster)
+  
+      # # classify individuals by type (case, control from case, or control from control)
+      # type <- tapply(sub_cohort$y, sub_cohort$cluster, function(y) {ifelse(length(y)>1, 2, ifelse(y==1, 1, 0))})
+      # unique_clusters <- unique(sub_cohort$cluster) # number of clusters in the sample
+      # temp <- data.frame(cbind(unique_clusters, type))
+      # colnames(temp) <- c("cluster", "type")
+      # # assign weights based on type
+      # sub_cohort <- merge(sub_cohort, temp, by="cluster") %>%
+      #   mutate(weights = ifelse(type==2, w10, ifelse(type==1, w1, w0)))
   
   output <- sub_cohort %>% group_by(cluster)
+  
+  # Return sampled data as a dataframe
+  return(as.data.frame(output))
+}
+
+wGEE_analysis <- function(sampled_data) {
+  # Conduct weighted GEE analysis on the sampled data
+  # Inputs: 
+  #   sampled_data: sampled dataset for nested case-control study
+  # Returns list containing:
+  #   var_slope: sandwich variance estimate of slope coefficient
+  #   estimate: estimate of slope coefficient, \hat\beta_1
   
   # fit IPWGEE and get robust variance for beta1
   fit <- geeglm(y ~ x, id=cluster, data=output, weights = weights, 
                 family=binomial, scale.fix=TRUE, corstr="independence")
   var_slope <- summary(fit)$coefficients[2,2]
-  
-  return(list("var_slope" = var_slope, "estimate" = summary(fit)$coefficients[2,1], "output" = as.data.frame(output)))
+  return(list("var_slope" = var_slope, "estimate" = summary(fit)$coefficients[2,1]))
 }
 
 
-
 temp_trials <- function(gamma, MC_sims) {
-  # Function to obtain simulation estimates and correlation in the full cohort (no weighting required)
+  # Obtain simulation estimates and correlation in the full cohort (no weighting required)
   # gamma: pairwise correlation between latent e_ki^B random variables
   # MC_sims: number of monte carlo simulations
   temp <- as.data.frame(matrix(nrow=MC_sims, ncol=3))
@@ -257,6 +335,7 @@ temp_trials <- function(gamma, MC_sims) {
   }
   apply(temp, 2, mean)
 }
+
 
 # Examine the relationship between gamma correlation and alpha correlation
 gamma <- seq(0, 0.6, by=0.02)
@@ -271,6 +350,8 @@ print(temp_results)
 ## When gamma = 0, alpha = 0.0023, P(Y=1|X=0) = 0.025, P(Y=1|X=1) = 1.97
 ## When gamma = 0.3 [16], alpha = 0.1496, P(Y=1|X=0) = 0.025, P(Y=1|X=1) = 2
 ## When gamma = 0.5 [26], alpha = 0.2971, P(Y=1|X=0) = 0.0254, P(Y=1|X=1) = 2.5
+
+
 
 
 
@@ -357,7 +438,10 @@ cor <- cov/(0.2*x_it*(1-0.2*x_it))
 
 
 
-### Run the simulations on a local cluster
+
+
+
+# ================ Run the simulations on a local cluster =============================================#
 
 cl <- makeCluster(4)
 registerDoParallel(cl)
